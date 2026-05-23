@@ -38,7 +38,7 @@ def calc_stats_for_range(start_d, end_d, sessions):
     active_days = len(set(s[0].date() for s in valid_sessions))
     
     # Aggregate note hits for the heatmap
-    note_counts = {i: 0 for i in range(21, 109)} # Standard 88-key piano range (A0 to C8)
+    note_counts = {i: 0 for i in range(21, 109)}
     for s in valid_sessions:
         for note, count in s[4].items():
             if note in note_counts:
@@ -59,13 +59,11 @@ def generate_dashboard(input_dir='.', output_file='index.html'):
     """
     logging.info(f"Starting Pianoteq Tracker in '{input_dir}'...")
     
-    # Regex to extract date, time, notes, and duration from Pianoteq MIDI filenames
     pattern = re.compile(r'(\d{4}-\d{2}-\d{2}) (\d{4}) \([A-Za-z]+\) (\d+) notes, (\d+) seconds\.mid')
     search_path = os.path.join(input_dir, '**', '*.mid')
     files = glob.glob(search_path, recursive=True)
     logging.info(f"Found {len(files)} MIDI files in the directory.")
     
-    # Data structures to hold aggregated time distributions
     daily_practice = defaultdict(float)
     weekly_duration = defaultdict(float)
     hourly_duration = defaultdict(float)
@@ -74,9 +72,6 @@ def generate_dashboard(input_dir='.', output_file='index.html'):
     
     sessions = []
     
-    # ---------------------------------------------------------
-    # 1. Parse all MIDI files
-    # ---------------------------------------------------------
     logging.info("Parsing files and extracting MIDI data...")
     successful_files = 0
     
@@ -93,34 +88,34 @@ def generate_dashboard(input_dir='.', output_file='index.html'):
                 start_dt = datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H%M")
                 end_dt = start_dt + timedelta(seconds=seconds)
                 
-                # Read MIDI file to extract specific note usage for the Heatmap
                 session_note_counts = defaultdict(int)
+                session_velocity_sums = defaultdict(int)
                 mid = mido.MidiFile(f)
                 for msg in mid:
                     if msg.type == 'note_on' and msg.velocity > 0:
                         session_note_counts[msg.note] += 1
+                        session_velocity_sums[msg.note] += msg.velocity
                         
-                sessions.append((start_dt, end_dt, notes, seconds, session_note_counts))
+                sessions.append((start_dt, end_dt, notes, seconds, session_note_counts, session_velocity_sums))
                 successful_files += 1
                 
             except Exception as e:
                 logging.error(f"Failed to process MIDI data for {name}: {e}")
                 continue
                 
-    # Sort all sessions chronologically
     sessions.sort(key=lambda x: x[0])
     logging.info(f"Successfully processed {successful_files} practice sessions.")
     
-    # Build raw session data for client-side chart recalculation
     logging.info("Formatting data payloads for JS frontend...")
     js_sessions = []
-    for s_start, s_end, notes, seconds, counts in sessions:
+    for s_start, s_end, notes, seconds, counts, velocities in sessions:
         js_sessions.append({
             "start": s_start.isoformat(),
             "end": s_end.isoformat(),
             "duration": seconds,
             "notes": notes,
-            "counts": dict(counts)
+            "counts": dict(counts),
+            "velocities": dict(velocities)
         })
     
     # ---------------------------------------------------------
@@ -129,8 +124,8 @@ def generate_dashboard(input_dir='.', output_file='index.html'):
     logging.info("Generating piano keyboard HTML structure...")
     note_names = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
     keyboard_html = '<div class="piano-container"><div class="piano">\n'
-    note = 21 # A0
-    while note <= 108: # C8
+    note = 21
+    while note <= 108:
         n_mod = note % 12
         name = f"{note_names[n_mod]}{(note // 12) - 1}"
         has_black = n_mod in [0, 2, 5, 7, 9] and note < 108
@@ -158,7 +153,6 @@ def generate_dashboard(input_dir='.', output_file='index.html'):
     week_d = today_d - timedelta(days=today_d.weekday())
     month_d = today_d.replace(day=1)
     
-    # Generate stats for the top interactive toggles
     quick_stats = {
         "today": calc_stats_for_range(today_d, datetime.max.date(), sessions),
         "week": calc_stats_for_range(week_d, datetime.max.date(), sessions),
@@ -166,17 +160,13 @@ def generate_dashboard(input_dir='.', output_file='index.html'):
         "all": calc_stats_for_range(datetime.min.date(), datetime.max.date(), sessions)
     }
 
-    # Generate custom stats for every single unique day and week available in the data
-    # (used by the custom Date Picker dropdown)
     unique_days = set(s[0].date() for s in sessions)
     all_daily_stats = {d.strftime('%Y-%m-%d'): calc_stats_for_range(d, d, sessions) for d in unique_days}
     
     unique_weeks = set(s[0].date() - timedelta(days=s[0].date().weekday()) for s in sessions)
     all_weekly_stats = {w.strftime('%Y-%m-%d'): calc_stats_for_range(w, w + timedelta(days=6), sessions) for w in unique_weeks}
     
-    # Distribute the exact duration of each session across the relevant day/hour boundaries
-    # (e.g., if a session spans from 1:50 PM to 2:10 PM, split the time proportionally)
-    for s_start, s_end, s_notes, s_seconds, s_counts in sessions:
+    for s_start, s_end, s_notes, s_seconds, s_counts, s_velocities in sessions:
         curr_time = s_start
         while curr_time < s_end:
             next_hour = (curr_time + timedelta(hours=1)).replace(minute=0, second=0, microsecond=0)
@@ -196,7 +186,6 @@ def generate_dashboard(input_dir='.', output_file='index.html'):
             
             curr_time = chunk_end
 
-    # Ensure the calendar matrix covers a perfect 365-day rolling window
     if daily_practice:
         end_date = datetime.strptime(max(daily_practice.keys()), "%Y-%m-%d")
     else:
@@ -213,7 +202,6 @@ def generate_dashboard(input_dir='.', output_file='index.html'):
     start_date_str = start_date.strftime("%Y-%m-%d")
     end_date_str = end_date.strftime("%Y-%m-%d")
         
-    # Format the data for ECharts payload injection
     logging.debug("Formatting data payloads for ECharts...")
     calendar_data = [[date, round(secs / 60, 2)] for date, secs in daily_practice.items() if start_date_str <= date <= end_date_str]
     
@@ -249,8 +237,6 @@ def generate_dashboard(input_dir='.', output_file='index.html'):
         .chart-md {{ height: 350px; }}
         .chart-calendar {{ height: 200px; min-width: 850px; }}
         .scrollable-x {{ overflow-x: auto; overflow-y: hidden; }}
-        
-        /* Piano Keyboard Heatmap CSS */
         .piano-container {{ width: 100%; overflow-x: auto; padding: 10px 0; }}
         .piano {{
             position: relative;
@@ -299,7 +285,7 @@ def generate_dashboard(input_dir='.', output_file='index.html'):
             transition: background-color 0.5s ease, filter 0.2s;
             cursor: pointer;
         }}
-        .black-key:hover {{ filter: brightness(2.5) contrast(1.2); }} 
+        .black-key:hover {{ filter: brightness(2.5) contrast(1.2); }}
     </style>
 </head>
 <body>
@@ -317,7 +303,6 @@ def generate_dashboard(input_dir='.', output_file='index.html'):
                     <button id="btn-all" type="button" class="btn btn-outline-primary timeframe-btn active" onclick="setQuickStats('all')">All Time</button>
                 </div>
                 
-                <!-- Custom Date Picker with Arrow Navigation -->
                 <div class="input-group shadow-sm w-auto">
                     <button class="btn btn-outline-primary" type="button" onclick="shiftDate(-1)" title="Previous">&#8592;</button>
                     <select id="custom-type" class="form-select form-select-sm" style="max-width: 90px; border-color: #0d6efd;" onchange="setCustomStats()">
@@ -329,52 +314,70 @@ def generate_dashboard(input_dir='.', output_file='index.html'):
                 </div>
             </div>
         </div>
-        
+
         <!-- Metrics Row -->
         <div class="row text-center mb-2">
-            <div class="col-6 col-md-4 col-xl-2">
+            <div class="col-6 col-md-3">
                 <div class="card p-3">
                     <div class="metric-value text-success" id="val-pure-time">0m</div>
                     <div class="metric-label">Practice Time</div>
                 </div>
             </div>
-            <div class="col-6 col-md-4 col-xl-2">
+            <div class="col-6 col-md-3">
                 <div class="card p-3">
                     <div class="metric-value" id="val-sessions">0</div>
                     <div class="metric-label">Sessions</div>
                 </div>
             </div>
-            <div class="col-6 col-md-4 col-xl-2">
+            <div class="col-6 col-md-3">
                 <div class="card p-3">
                     <div class="metric-value" id="val-active-days">0</div>
                     <div class="metric-label">Active Days</div>
                 </div>
             </div>
-            <div class="col-6 col-md-4 col-xl-2">
+            <div class="col-6 col-md-3">
                 <div class="card p-3">
                     <div class="metric-value" id="val-max-block">0m</div>
                     <div class="metric-label">Longest Session</div>
                 </div>
             </div>
-            <div class="col-6 col-md-4 col-xl-2">
+            <div class="col-6 col-md-3">
                 <div class="card p-3">
                     <div class="metric-value" id="val-total-notes">0</div>
                     <div class="metric-label">Total Notes</div>
                 </div>
             </div>
-            <div class="col-6 col-md-4 col-xl-2">
+            <div class="col-6 col-md-3">
                 <div class="card p-3">
                     <div class="metric-value" id="val-avg-session">0m</div>
                     <div class="metric-label">Avg Session</div>
                 </div>
             </div>
+            <div class="col-6 col-md-3">
+                <div class="card p-3">
+                    <div class="metric-value" id="val-streak">0d</div>
+                    <div class="metric-label">Streak</div>
+                </div>
+            </div>
+            <div class="col-6 col-md-3">
+                <div class="card p-3">
+                    <div class="metric-value" id="val-keys-per-min">0</div>
+                    <div class="metric-label">Keys/min</div>
+                </div>
+            </div>
         </div>
-        
+
         <!-- Piano Heatmap Row -->
         <div class="row">
             <div class="col-12">
                 <div class="card p-4 border-top border-danger border-4">
-                    <h5 class="card-title fw-bold text-secondary mb-3">88-Key Piano Usage Heatmap (Hover keys for info)</h5>
+                    <div class="d-flex justify-content-between align-items-center mb-3">
+                        <h5 class="card-title fw-bold text-secondary m-0">88-Key Piano Usage Heatmap</h5>
+                        <div class="btn-group btn-group-sm" role="group">
+                            <button id="piano-mode-hits" type="button" class="btn btn-outline-danger active" onclick="setPianoMode('hits')">Hits</button>
+                            <button id="piano-mode-velocity" type="button" class="btn btn-outline-danger" onclick="setPianoMode('velocity')">Velocity</button>
+                        </div>
+                    </div>
                     {keyboard_html}
                 </div>
             </div>
@@ -395,21 +398,7 @@ def generate_dashboard(input_dir='.', output_file='index.html'):
                 </div>
             </div>
         </div>
-        
-        <!-- Dynamic Charts Row 2 -->
-        <div class="row">
-            <div class="col-12">
-                <div class="card p-4">
-                    <h5 class="card-title fw-bold text-secondary mb-3">Practice Time Trend</h5>
-                    <div class="chart-container chart-md" id="weeklyChart"></div>
-                </div>
-            </div>
-        </div>
 
-        <hr class="my-4">
-        <h4 class="fw-bold text-gray-800 mb-4">All-Time Historical Heatmaps</h4>
-
-        <!-- Static Heatmaps Rows -->
         <div class="row">
             <div class="col-12">
                 <div class="card p-4 border-top border-success border-4">
@@ -420,7 +409,7 @@ def generate_dashboard(input_dir='.', output_file='index.html'):
                 </div>
             </div>
         </div>
-        
+
         <div class="row">
             <div class="col-12">
                 <div class="card p-4">
@@ -429,18 +418,61 @@ def generate_dashboard(input_dir='.', output_file='index.html'):
                 </div>
             </div>
         </div>
+
+        <hr class="my-4">
+        <h4 class="fw-bold text-gray-800 mb-4">Per-Timeframe Analysis</h4>
+
+        <!-- Dynamic Charts Row 2 -->
+        <div class="row">
+            <div class="col-lg-6">
+                <div class="card p-4">
+                    <h5 class="card-title fw-bold text-secondary mb-3">Top 10 Most Played Notes</h5>
+                    <div class="chart-container chart-md" id="topNotesChart"></div>
+                </div>
+            </div>
+            <div class="col-lg-6">
+                <div class="card p-4">
+                    <h5 class="card-title fw-bold text-secondary mb-3">Hand Split (Left vs Right)</h5>
+                    <div class="chart-container chart-md" id="handSplitChart"></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Dynamic Charts Row 3 -->
+        <div class="row">
+            <div class="col-12">
+                <div class="card p-4">
+                    <h5 class="card-title fw-bold text-secondary mb-3">Practice Time Trend <span class="text-muted fw-normal" style="font-size: 0.8rem;">(with 7-day rolling average)</span></h5>
+                    <div class="chart-container chart-md" id="weeklyChart"></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Dynamic Charts Row 4 -->
+        <div class="row">
+            <div class="col-lg-12">
+                <div class="card p-4">
+                    <h5 class="card-title fw-bold text-secondary mb-3">Monthly Practice Time</h5>
+                    <div class="chart-container chart-md" id="monthlyChart"></div>
+                </div>
+            </div>
+        </div>
     </div>
 
     <!-- Application Logic -->
     <script>
-        // Inject Python data objects
         const quickStats = {json.dumps(quick_stats)};
         const allDaily = {json.dumps(all_daily_stats)};
         const allWeekly = {json.dumps(all_weekly_stats)};
         const allSessions = {json.dumps(js_sessions)};
-        
+
         const noteNames = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
-        
+        const hours = ['12am', '1am', '2am', '3am', '4am', '5am', '6am', '7am', '8am', '9am', '10am', '11am', '12pm', '1pm', '2pm', '3pm', '4pm', '5pm', '6pm', '7pm', '8pm', '9pm', '10pm', '11pm'];
+        const days = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
+        const midiNoteMin = 21, midiNoteMax = 108;
+
+        let currentPianoMode = 'hits';
+
         function formatTime(minutes) {{
             if (minutes === 0) return '0m';
             if (minutes >= 60) {{
@@ -450,7 +482,7 @@ def generate_dashboard(input_dir='.', output_file='index.html'):
             }}
             return Math.round(minutes) + 'm';
         }}
-        
+
         function getEmptyStats() {{
             return {{
                 practice_time: 0, sessions: 0, active_days: 0,
@@ -458,52 +490,143 @@ def generate_dashboard(input_dir='.', output_file='index.html'):
             }};
         }}
 
-        // Updates HTML elements with the provided statistics payload
-        function renderStats(data) {{
+        function filterSessionsByRange(sessions, startD, endD) {{
+            return sessions.filter(s => {{
+                const d = new Date(s.start);
+                return d >= startD && d <= endD;
+            }});
+        }}
+
+        function renderMetrics(data, filtered) {{
             document.getElementById('val-pure-time').innerText = formatTime(data.practice_time / 60);
             document.getElementById('val-sessions').innerText = data.sessions;
             document.getElementById('val-active-days').innerText = data.active_days;
             document.getElementById('val-max-block').innerText = formatTime(data.max_session / 60);
             document.getElementById('val-total-notes').innerText = data.total_notes.toLocaleString();
             document.getElementById('val-avg-session').innerText = data.sessions > 0 ? formatTime(data.practice_time / 60 / data.sessions) : '0m';
-            
-            let maxCount = 1;
-            for (let i = 21; i <= 108; i++) {{
-                if ((data.note_counts[i] || 0) > maxCount) maxCount = data.note_counts[i];
-            }}
-            
-            for (let i = 21; i <= 108; i++) {{
-                let el = document.getElementById('key-' + i);
-                if (!el) continue;
-                
-                let count = data.note_counts[i] || 0;
-                let n_mod = i % 12;
-                let isBlack = [1, 3, 6, 8, 10].includes(n_mod);
-                
-                el.setAttribute('data-hits', count.toLocaleString());
-                
-                if (count === 0) {{
-                    el.style.backgroundColor = isBlack ? "#000000" : "#ffffff";
+            document.getElementById('val-keys-per-min').innerText = data.practice_time > 0 ? (data.total_notes / (data.practice_time / 60)).toFixed(1) : '0';
+
+            // Streak
+            const dates = [...new Set(filtered.map(s => s.start.split('T')[0]))].sort();
+            let longest = dates.length > 0 ? 1 : 0;
+            let curStreak = 1;
+            for (let i = 1; i < dates.length; i++) {{
+                const prev = new Date(dates[i - 1]);
+                const cur = new Date(dates[i]);
+                const diff = (cur - prev) / 86400000;
+                if (diff === 1) {{
+                    curStreak++;
+                    if (curStreak > longest) longest = curStreak;
                 }} else {{
-                    let mathA = Math.sqrt(count / maxCount);
-                    if (isBlack) {{
-                        let r = Math.max(60, Math.floor(255 * mathA));
-                        el.style.backgroundColor = `rgb(${{r}}, 0, 0)`;
-                    }} else {{
-                        let gb = Math.floor(255 * (1 - mathA));
-                        el.style.backgroundColor = `rgb(255, ${{gb}}, ${{gb}})`;
+                    curStreak = 1;
+                }}
+            }}
+            // Current streak from today backwards
+            let currStreakVal = 0;
+            if (dates.length > 0) {{
+                const lastDate = new Date(dates[dates.length - 1]);
+                const today = new Date();
+                today.setHours(0,0,0,0);
+                const daysSinceLastSession = Math.round((today - lastDate) / 86400000);
+                if (daysSinceLastSession <= 1) {{
+                    currStreakVal = 1;
+                    for (let i = dates.length - 2; i >= 0; i--) {{
+                        const cur = new Date(dates[i]);
+                        const next = new Date(dates[i + 1]);
+                        if ((next - cur) / 86400000 === 1) {{
+                            currStreakVal++;
+                        }} else {{
+                            break;
+                        }}
                     }}
                 }}
             }}
+            document.getElementById('val-streak').innerText = currStreakVal + 'd / ' + longest + 'd';
         }}
 
-        // Recalculate dynamic charts from filtered session data
+        function renderPiano(filtered, mode) {{
+            const counts = {{}};
+            const velocities = {{}};
+            for (let i = midiNoteMin; i <= midiNoteMax; i++) {{ counts[i] = 0; velocities[i] = 0; }}
+
+            filtered.forEach(s => {{
+                for (const [note, count] of Object.entries(s.counts)) {{
+                    const n = parseInt(note);
+                    if (n >= midiNoteMin && n <= midiNoteMax) counts[n] += count;
+                }}
+                if (mode === 'velocity') {{
+                    for (const [note, velSum] of Object.entries(s.velocities)) {{
+                        const n = parseInt(note);
+                        if (n >= midiNoteMin && n <= midiNoteMax) velocities[n] += velSum;
+                    }}
+                }}
+            }});
+
+            const tooltip = document.getElementById('piano-tooltip');
+            for (let i = midiNoteMin; i <= midiNoteMax; i++) {{
+                const el = document.getElementById('key-' + i);
+                if (!el) continue;
+                const isBlack = [1, 3, 6, 8, 10].includes(i % 12);
+                const count = counts[i];
+                const val = mode === 'velocity' ? (count > 0 ? Math.round(velocities[i] / count) : 0) : count;
+                const displayVal = mode === 'velocity' ? val + ' avg vel' : val.toLocaleString() + ' hits';
+
+                el.setAttribute('data-hits', displayVal);
+
+                if (val === 0) {{
+                    el.style.backgroundColor = isBlack ? '#000000' : '#ffffff';
+                }} else if (mode === 'velocity') {{
+                    const t = Math.min(val / 127, 1);
+                    let r, g, b;
+                    if (t < 0.5) {{
+                        const s = t / 0.5;
+                        r = Math.floor(255 * s);
+                        g = 255;
+                        b = 0;
+                    }} else {{
+                        const s = (t - 0.5) / 0.5;
+                        r = 255;
+                        g = Math.floor(255 * (1 - s));
+                        b = 0;
+                    }}
+                    el.style.backgroundColor = 'rgb(' + r + ', ' + g + ', ' + b + ')';
+                }} else {{
+                    const mathA = Math.sqrt(val / Math.max(...Object.values(counts), 1));
+                    if (isBlack) {{
+                        const r = Math.max(60, Math.floor(255 * mathA));
+                        el.style.backgroundColor = 'rgb(' + r + ', 0, 0)';
+                    }} else {{
+                        const gb = Math.floor(255 * (1 - mathA));
+                        el.style.backgroundColor = 'rgb(255, ' + gb + ', ' + gb + ')';
+                    }}
+                }}
+
+                el.removeEventListener('mouseenter', el._tooltipHandler);
+                el._tooltipHandler = function() {{
+                    const name = el.getAttribute('data-note');
+                    const h = el.getAttribute('data-hits');
+                    tooltip.innerHTML = '<strong>' + name + '</strong>: ' + h;
+                    tooltip.style.display = 'block';
+                }};
+                el.addEventListener('mouseenter', el._tooltipHandler);
+            }}
+        }}
+
         function updateCharts(filtered) {{
             let hourly = new Array(24).fill(0);
             let dayOfWeek = new Array(7).fill(0);
             let weekly = {{}};
-            
+            const handLeft = {{}};
+            const handRight = {{}};
+
             filtered.forEach(s => {{
+                // Hand split
+                for (const [note, count] of Object.entries(s.counts)) {{
+                    const n = parseInt(note);
+                    if (n < 60) handLeft[n] = (handLeft[n] || 0) + count;
+                    else handRight[n] = (handRight[n] || 0) + count;
+                }}
+
                 let curr = new Date(s.start);
                 let end = new Date(s.end);
                 while (curr < end) {{
@@ -511,55 +634,111 @@ def generate_dashboard(input_dir='.', output_file='index.html'):
                     nextH.setHours(curr.getHours() + 1, 0, 0, 0);
                     let chunkEnd = new Date(Math.min(end, nextH));
                     let chunkSecs = (chunkEnd - curr) / 1000;
-                    
+
                     hourly[curr.getHours()] += chunkSecs;
                     let dow = (curr.getDay() + 6) % 7;
                     dayOfWeek[dow] += chunkSecs;
-                    
+
                     let ws = new Date(curr);
                     ws.setDate(curr.getDate() - dow);
                     let wsStr = ws.getFullYear() + '-' + String(ws.getMonth()+1).padStart(2,'0') + '-' + String(ws.getDate()).padStart(2,'0');
-                    
                     if (!weekly[wsStr]) weekly[wsStr] = 0;
                     weekly[wsStr] += chunkSecs;
+
                     curr = chunkEnd;
                 }}
             }});
-            
+
+            // Existing charts
             timeOfDayChart.setOption({{ series: [{{ data: hourly.map(s => Math.round(s/60)) }}] }});
             dayOfWeekChart.setOption({{ series: [{{ data: dayOfWeek.map(s => Math.round(s/60)) }}] }});
-            
-            let sortedWeeks = Object.keys(weekly).sort();
+
+            // Weekly trend with rolling average
+            const sortedWeeks = Object.keys(weekly).sort();
+            const weekData = sortedWeeks.map(w => Math.round(weekly[w]/60));
+            const rolling7 = weekData.map((_, i) => {{
+                const start = Math.max(0, i - 6);
+                const slice = weekData.slice(start, i + 1);
+                return Math.round(slice.reduce((a, b) => a + b, 0) / slice.length);
+            }});
             weeklyChart.setOption({{
                 xAxis: {{ data: sortedWeeks }},
-                series: [{{ data: sortedWeeks.map(w => Math.round(weekly[w]/60)) }}]
+                series: [
+                    {{ name: 'Weekly', type: 'line', data: weekData, smooth: true, areaStyle: {{ color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [ {{ offset: 0, color: 'rgba(59,130,246,0.5)' }}, {{ offset: 1, color: 'rgba(59,130,246,0.1)' }} ]) }}, itemStyle: {{ color: '#3b82f6' }}, lineStyle: {{ width: 3 }} }},
+                    {{ name: '7-day Avg', type: 'line', data: rolling7, smooth: true, lineStyle: {{ width: 2, type: 'dashed', color: '#f59e0b' }}, itemStyle: {{ color: '#f59e0b' }}, symbol: 'none' }}
+                ]
+            }});
+
+            // Monthly chart (always all-time, independent of timeframe selection)
+            const monthlyAll = {{}};
+            allSessions.forEach(s => {{
+                const curr = new Date(s.start);
+                const ms = curr.getFullYear() + '-' + String(curr.getMonth()+1).padStart(2,'0');
+                if (!monthlyAll[ms]) monthlyAll[ms] = 0;
+                monthlyAll[ms] += s.duration;
+            }});
+            const sortedMonths = Object.keys(monthlyAll).sort();
+            monthlyChart.setOption({{
+                xAxis: {{ data: sortedMonths }},
+                series: [{{ data: sortedMonths.map(m => Math.round(monthlyAll[m]/60)) }}]
+            }});
+
+            // Top 10 notes
+            const allCounts = {{}};
+            filtered.forEach(s => {{
+                for (const [note, count] of Object.entries(s.counts)) {{
+                    const n = parseInt(note);
+                    allCounts[n] = (allCounts[n] || 0) + count;
+                }}
+            }});
+            const sortedNotes = Object.entries(allCounts).sort((a, b) => b[1] - a[1]).slice(0, 10);
+            const topLabels = sortedNotes.map(([n]) => {{ const nn = parseInt(n); return noteNames[nn % 12] + Math.floor(nn / 12 - 1); }}).reverse();
+            const topData = sortedNotes.map(([, c]) => c).reverse();
+            topNotesChart.setOption({{
+                xAxis: {{ type: 'value' }},
+                yAxis: {{ type: 'category', data: topLabels }},
+                series: [{{ type: 'bar', data: topData, itemStyle: {{ color: '#8b5cf6', borderRadius: [0, 4, 4, 0] }}, label: {{ show: true, position: 'right', formatter: p => p.value.toLocaleString() }} }}]
+            }});
+
+            // Hand split
+            const leftTotal = Object.values(handLeft).reduce((a, b) => a + b, 0);
+            const rightTotal = Object.values(handRight).reduce((a, b) => a + b, 0);
+            const totalHand = leftTotal + rightTotal || 1;
+            handSplitChart.setOption({{
+                tooltip: {{ trigger: 'item', formatter: p => p.name + '<br/>' + p.value.toLocaleString() + ' notes (' + p.percent.toFixed(1) + '%)' }},
+                series: [{{
+                    type: 'pie', radius: ['40%', '70%'], center: ['50%', '55%'],
+                    data: [
+                        {{ name: 'Left Hand', value: leftTotal, itemStyle: {{ color: '#3b82f6' }} }},
+                        {{ name: 'Right Hand', value: rightTotal, itemStyle: {{ color: '#10b981' }} }}
+                    ],
+                    label: {{ formatter: p => p.name + '\\n' + p.percent.toFixed(1) + '%' }}
+                }}]
             }});
         }}
 
-        // Handlers for the "Today", "This Week", etc. quick buttons
-        function setQuickStats(tf) {{
+        function refreshAll(tf) {{
+            const btn = document.getElementById('btn-' + tf);
             document.querySelectorAll('.timeframe-btn').forEach(b => {{
                 b.classList.remove('active', 'btn-primary');
                 b.classList.add('btn-outline-primary');
             }});
-            const btn = document.getElementById('btn-' + tf);
-            if(btn) {{
+            if (btn) {{
                 btn.classList.remove('btn-outline-primary');
                 btn.classList.add('active', 'btn-primary');
             }}
             document.getElementById('custom-date').value = '';
-            
-            renderStats(quickStats[tf]);
-            
-            let now = new Date();
+
+            renderMetrics(quickStats[tf], filterSessionsByRange(allSessions, new Date(0), new Date(8640000000000000)));
+
             let startD, endD;
-            
+            let now = new Date();
             if (tf === 'today') {{
                 startD = new Date(now.getFullYear(), now.getMonth(), now.getDate());
                 endD = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59);
             }} else if (tf === 'week') {{
-                let day = now.getDay();
-                let diff = now.getDate() - day + (day === 0 ? -6 : 1);
+                const day = now.getDay();
+                const diff = now.getDate() - day + (day === 0 ? -6 : 1);
                 startD = new Date(now.getFullYear(), now.getMonth(), diff);
                 endD = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59);
             }} else if (tf === 'month') {{
@@ -569,15 +748,16 @@ def generate_dashboard(input_dir='.', output_file='index.html'):
                 startD = new Date(0);
                 endD = new Date(8640000000000000);
             }}
-            
-            let filtered = allSessions.filter(s => {{
-                let d = new Date(s.start);
-                return d >= startD && d <= endD;
-            }});
+
+            const filtered = filterSessionsByRange(allSessions, startD, endD);
+            renderPiano(filtered, currentPianoMode);
             updateCharts(filtered);
         }}
 
-        // Handler for custom date picker selections
+        function setQuickStats(tf) {{
+            refreshAll(tf);
+        }}
+
         function setCustomStats() {{
             const dateVal = document.getElementById('custom-date').value;
             if (!dateVal) return;
@@ -588,9 +768,8 @@ def generate_dashboard(input_dir='.', output_file='index.html'):
             }});
 
             const type = document.getElementById('custom-type').value;
-            let data;
-            let startD, endD;
-            
+            let data, startD, endD;
+
             if (type === 'day') {{
                 data = allDaily[dateVal] || getEmptyStats();
                 startD = new Date(dateVal + 'T00:00:00Z');
@@ -606,25 +785,22 @@ def generate_dashboard(input_dir='.', output_file='index.html'):
                 endD = new Date(mondayStr + 'T23:59:59Z');
                 endD.setUTCDate(endD.getUTCDate() + 6);
             }}
-            renderStats(data);
-            
-            let filtered = allSessions.filter(s => {{
-                let d = new Date(s.start);
-                return d >= startD && d <= endD;
-            }});
+
+            const filteredAll = filterSessionsByRange(allSessions, new Date(0), new Date(8640000000000000));
+            renderMetrics(data, filteredAll);
+
+            const filtered = filterSessionsByRange(allSessions, startD, endD);
+            renderPiano(filtered, currentPianoMode);
             updateCharts(filtered);
         }}
 
-        // Helper function triggered by the Arrow (< / >) buttons
         function shiftDate(direction) {{
             const dateInput = document.getElementById('custom-date');
-            
             if (!dateInput.value) {{
                 dateInput.value = new Date().toISOString().split('T')[0];
             }} else {{
                 const type = document.getElementById('custom-type').value;
-                let d = new Date(dateInput.value + 'T00:00:00Z'); 
-                
+                let d = new Date(dateInput.value + 'T00:00:00Z');
                 if (type === 'day') {{
                     d.setUTCDate(d.getUTCDate() + direction);
                 }} else {{
@@ -632,32 +808,80 @@ def generate_dashboard(input_dir='.', output_file='index.html'):
                 }}
                 dateInput.value = d.toISOString().split('T')[0];
             }}
-            
             setCustomStats();
         }}
 
-        // --- Tooltip Logic for Piano Heatmap ---
+        function setPianoMode(mode) {{
+            currentPianoMode = mode;
+            document.getElementById('piano-mode-hits').classList.toggle('active', mode === 'hits');
+            document.getElementById('piano-mode-velocity').classList.toggle('active', mode === 'velocity');
+
+            const customDate = document.getElementById('custom-date').value;
+            let startD, endD;
+
+            if (customDate) {{
+                const type = document.getElementById('custom-type').value;
+                if (type === 'day') {{
+                    startD = new Date(customDate + 'T00:00:00Z');
+                    endD = new Date(customDate + 'T23:59:59Z');
+                }} else {{
+                    let d = new Date(customDate + 'T00:00:00Z');
+                    let day = d.getUTCDay();
+                    let diff = d.getUTCDate() - day + (day === 0 ? -6 : 1);
+                    let monday = new Date(d.setUTCDate(diff));
+                    let mondayStr = monday.toISOString().split('T')[0];
+                    startD = new Date(mondayStr + 'T00:00:00Z');
+                    endD = new Date(mondayStr + 'T23:59:59Z');
+                    endD.setUTCDate(endD.getUTCDate() + 6);
+                }}
+            }} else {{
+                const activeBtn = document.querySelector('.timeframe-btn.active');
+                if (activeBtn) {{
+                    const tf = activeBtn.id.replace('btn-', '');
+                    const now = new Date();
+                    if (tf === 'today') {{
+                        startD = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+                        endD = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59);
+                    }} else if (tf === 'week') {{
+                        const day = now.getDay();
+                        const diff = now.getDate() - day + (day === 0 ? -6 : 1);
+                        startD = new Date(now.getFullYear(), now.getMonth(), diff);
+                        endD = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59);
+                    }} else if (tf === 'month') {{
+                        startD = new Date(now.getFullYear(), now.getMonth(), 1);
+                        endD = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59);
+                    }} else {{
+                        startD = new Date(0);
+                        endD = new Date(8640000000000000);
+                    }}
+                }}
+            }}
+
+            if (startD && endD) {{
+                const filtered = filterSessionsByRange(allSessions, startD, endD);
+                renderPiano(filtered, mode);
+            }}
+        }}
+
+        // --- Piano Tooltip ---
         const tooltip = document.getElementById('piano-tooltip');
         document.querySelectorAll('.white-key, .black-key').forEach(key => {{
-            key.addEventListener('mouseenter', (e) => {{
-                const noteName = key.getAttribute('data-note');
-                const hits = key.getAttribute('data-hits');
-                tooltip.innerHTML = '<strong>' + noteName + '</strong>: ' + hits + ' hits';
+            key.addEventListener('mouseenter', function(e) {{
+                const name = this.getAttribute('data-note');
+                const val = this.getAttribute('data-hits');
+                tooltip.innerHTML = '<strong>' + name + '</strong>: ' + val;
                 tooltip.style.display = 'block';
             }});
-            key.addEventListener('mousemove', (e) => {{
+            key.addEventListener('mousemove', function(e) {{
                 tooltip.style.left = e.clientX + 'px';
                 tooltip.style.top = e.clientY + 'px';
             }});
-            key.addEventListener('mouseleave', () => {{
+            key.addEventListener('mouseleave', function() {{
                 tooltip.style.display = 'none';
             }});
         }});
 
-        // --- Initialize ECharts Instances (Dynamic Charts) ---
-        const hours = ['12am', '1am', '2am', '3am', '4am', '5am', '6am', '7am', '8am', '9am', '10am', '11am', '12pm', '1pm', '2pm', '3pm', '4pm', '5pm', '6pm', '7pm', '8pm', '9pm', '10pm', '11pm'];
-        const days = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
-
+        // --- Initialize ECharts Instances ---
         const timeOfDayChart = echarts.init(document.getElementById('timeOfDayChart'));
         timeOfDayChart.setOption({{
             tooltip: {{ trigger: 'item', formatter: p => p.name + '<br/>' + formatTime(p.value) }},
@@ -678,17 +902,56 @@ def generate_dashboard(input_dir='.', output_file='index.html'):
 
         const weeklyChart = echarts.init(document.getElementById('weeklyChart'));
         weeklyChart.setOption({{
-            tooltip: {{ trigger: 'axis', axisPointer: {{ type: 'cross' }}, formatter: p => p[0].name + '<br/>' + formatTime(p[0].value) }},
-            grid: {{ left: '3%', right: '4%', bottom: '3%', top: '10%', containLabel: true }},
+            tooltip: {{ trigger: 'axis', axisPointer: {{ type: 'cross' }}, formatter: p => {{
+                let s = p[0].name + '<br/>';
+                p.forEach(item => s += item.marker + ' ' + item.seriesName + ': ' + formatTime(item.value) + '<br/>');
+                return s;
+            }} }},
+            legend: {{ data: ['Weekly', '7-day Avg'], bottom: 0, icon: 'roundRect', itemWidth: 12 }},
+            grid: {{ left: '3%', right: '4%', bottom: '15%', top: '10%', containLabel: true }},
             xAxis: {{ type: 'category', data: [] }},
             yAxis: {{ type: 'value', name: 'Practice Time', axisLabel: {{ formatter: val => formatTime(val) }} }},
-            series: [{{ type: 'line', smooth: true, areaStyle: {{ color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [ {{ offset: 0, color: 'rgba(59,130,246,0.5)' }}, {{ offset: 1, color: 'rgba(59,130,246,0.1)' }} ]) }}, itemStyle: {{ color: '#3b82f6' }}, lineStyle: {{ width: 3 }} }}]
+            series: [
+                {{ name: 'Weekly', type: 'line', smooth: true, areaStyle: {{ color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [ {{ offset: 0, color: 'rgba(59,130,246,0.5)' }}, {{ offset: 1, color: 'rgba(59,130,246,0.1)' }} ]) }}, itemStyle: {{ color: '#3b82f6' }}, lineStyle: {{ width: 3 }} }},
+                {{ name: '7-day Avg', type: 'line', smooth: true, lineStyle: {{ width: 2, type: 'dashed', color: '#f59e0b' }}, itemStyle: {{ color: '#f59e0b' }}, symbol: 'none' }}
+            ]
+        }});
+
+        const monthlyChart = echarts.init(document.getElementById('monthlyChart'));
+        monthlyChart.setOption({{
+            tooltip: {{ trigger: 'axis', axisPointer: {{ type: 'shadow' }}, formatter: p => p[0].name + '<br/>' + formatTime(p[0].value) }},
+            grid: {{ left: '3%', right: '4%', bottom: '12%', top: '10%', containLabel: true }},
+            xAxis: {{ type: 'category', data: [], axisLabel: {{ rotate: 45, fontSize: 10 }} }},
+            yAxis: {{ type: 'value', name: 'Practice Time', axisLabel: {{ formatter: val => formatTime(val) }} }},
+            series: [{{ type: 'bar', barWidth: '60%', itemStyle: {{ color: '#8b5cf6', borderRadius: [4, 4, 0, 0] }} }}]
+        }});
+
+        const topNotesChart = echarts.init(document.getElementById('topNotesChart'));
+        topNotesChart.setOption({{
+            tooltip: {{ trigger: 'axis', axisPointer: {{ type: 'shadow' }}, formatter: p => p[0].name + '<br/>' + p[0].value.toLocaleString() + ' hits' }},
+            grid: {{ left: '15%', right: '10%', bottom: '5%', top: '5%', containLabel: true }},
+            xAxis: {{ type: 'value' }},
+            yAxis: {{ type: 'category', data: [] }},
+            series: [{{ type: 'bar', itemStyle: {{ color: '#8b5cf6', borderRadius: [0, 4, 4, 0] }} }}]
+        }});
+
+        const handSplitChart = echarts.init(document.getElementById('handSplitChart'));
+        handSplitChart.setOption({{
+            tooltip: {{ trigger: 'item', formatter: p => p.name + '<br/>' + p.value.toLocaleString() + ' notes (' + p.percent.toFixed(1) + '%)' }},
+            series: [{{
+                type: 'pie', radius: ['40%', '70%'], center: ['50%', '55%'],
+                data: [
+                    {{ name: 'Left Hand', value: 0, itemStyle: {{ color: '#3b82f6' }} }},
+                    {{ name: 'Right Hand', value: 0, itemStyle: {{ color: '#10b981' }} }}
+                ],
+                label: {{ formatter: p => p.name + '\\n' + p.percent.toFixed(1) + '%' }}
+            }}]
         }});
 
         // --- Static ECharts (All-Time Historical Views) ---
         const calDataPractice = {json.dumps(calendar_data)};
         const punchcardData = {json.dumps(punchcard_data)};
-        
+
         const maxPunchcardVal = Math.max(...punchcardData.map(d => d[2]), 1);
 
         const practiceVisualMap = {{ type: 'piecewise', orient: 'horizontal', left: 'right', top: -10, pieces: [ {{value: 0, color: '#ebedf0'}}, {{min: 0.01, max: 15, color: '#a7f3d0'}}, {{min: 15.01, max: 45, color: '#34d399'}}, {{min: 45.01, max: 90, color: '#10b981'}}, {{min: 90.01, color: '#047857'}} ], show: false }};
@@ -703,19 +966,28 @@ def generate_dashboard(input_dir='.', output_file='index.html'):
 
         const calendarChartPractice = echarts.init(document.getElementById('calendarChartPractice'));
         calendarChartPractice.setOption({{ tooltip: {{ formatter: p => p.data[0] + '<br/>' + formatTime(p.data[1]) }}, visualMap: practiceVisualMap, calendar: calendarOptions, series: [{{ type: 'heatmap', coordinateSystem: 'calendar', data: calDataPractice }}] }});
+        calendarChartPractice.on('click', function(params) {{
+            if (params.data && params.data[0]) {{
+                document.getElementById('custom-date').value = params.data[0];
+                document.getElementById('custom-type').value = 'day';
+                setCustomStats();
+            }}
+        }});
 
         const punchcardChart = echarts.init(document.getElementById('punchcardChart'));
         punchcardChart.setOption({{ tooltip: {{ position: 'top', formatter: p => days[p.data[1]] + ' at ' + hours[p.data[0]] + '<br/>' + formatTime(p.data[2]) }}, grid: {{ top: 20, bottom: 40, left: 80, right: 20 }}, xAxis: {{ type: 'category', data: hours, splitArea: {{ show: true }} }}, yAxis: {{ type: 'category', data: days, splitArea: {{ show: true }} }}, visualMap: {{ min: 0, max: maxPunchcardVal, calculable: true, orient: 'horizontal', left: 'center', bottom: -10, inRange: {{ color: ['#f6faaa', '#FEE08B', '#FDAE61', '#F46D43', '#D53E4F', '#9E0142'] }} }}, series: [{{ name: 'Practice Time', type: 'heatmap', data: punchcardData, label: {{ show: false }}, emphasis: {{ itemStyle: {{ shadowBlur: 10, shadowColor: 'rgba(0, 0, 0, 0.5)' }} }} }}] }});
 
-        // Initialize on load - populates all metrics, piano, and dynamic charts
-        setQuickStats('all');
+        refreshAll('all');
 
-        window.addEventListener('resize', function() {{ 
-            timeOfDayChart.resize(); 
-            dayOfWeekChart.resize(); 
-            weeklyChart.resize(); 
-            calendarChartPractice.resize(); 
-            punchcardChart.resize(); 
+        window.addEventListener('resize', function() {{
+            timeOfDayChart.resize();
+            dayOfWeekChart.resize();
+            weeklyChart.resize();
+            monthlyChart.resize();
+            topNotesChart.resize();
+            handSplitChart.resize();
+            calendarChartPractice.resize();
+            punchcardChart.resize();
         }});
     </script>
 </body>
